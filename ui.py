@@ -124,7 +124,7 @@ class OnlineSoundBrowser(tk.Toplevel):
 
         tk.Label(
             header,
-            text="🌐 GitHub Sound Browser",
+            text="🌐 Cloud Sound Library",
             bg=self.colors["card"],
             fg=self.colors["primary"],
             font=("Segoe UI", 14, "bold"),
@@ -132,7 +132,7 @@ class OnlineSoundBrowser(tk.Toplevel):
 
         tk.Label(
             header,
-            text=f"{self.repo_owner}/{self.repo_name}",
+            text="Official Alarm Tones",
             bg=self.colors["card"],
             fg=self.colors["text_muted"],
             font=("Segoe UI", 10),
@@ -141,14 +141,41 @@ class OnlineSoundBrowser(tk.Toplevel):
         self.content_frame = tk.Frame(self, bg=self.colors["bg"], padx=20, pady=10)
         self.content_frame.pack(fill="both", expand=True)
 
+        # --- Modern Loading Animation ---
+        self.loading_container = tk.Frame(self.content_frame, bg=self.colors["bg"])
+        self.loading_container.pack(expand=True, pady=100)
+
+        # 1. Circular Spinner
+        self.spinner_canvas = tk.Canvas(
+            self.loading_container,
+            width=50,
+            height=50,
+            bg=self.colors["bg"],
+            highlightthickness=0,
+        )
+        self.spinner_canvas.pack()
+        self._spinner_angle = 0
+        self._animate_spinner()
+
+        # 2. Status with "Thinking" Dots
         self.status_label = tk.Label(
-            self.content_frame,
-            text="Fetching sounds from GitHub...",
+            self.loading_container,
+            text="Syncing library",
             bg=self.colors["bg"],
             fg=self.colors["text"],
-            font=("Segoe UI", 11),
+            font=("Segoe UI", 11, "bold"),
         )
-        self.status_label.pack(pady=50)
+        self.status_label.pack(pady=(15, 0))
+
+        self.dots_label = tk.Label(
+            self.loading_container,
+            text="",
+            bg=self.colors["bg"],
+            fg=self.colors["primary"],
+            font=("Segoe UI", 14, "bold"),
+        )
+        self.dots_label.pack()
+        self._animate_thinking_dots(0)
 
         self.list_container = tk.Frame(self.content_frame, bg=self.colors["bg"])
 
@@ -185,6 +212,41 @@ class OnlineSoundBrowser(tk.Toplevel):
         self.canvas.bind("<Button-4>", _on_mousewheel_linux_up)
         self.canvas.bind("<Button-5>", _on_mousewheel_linux_down)
 
+    def _animate_spinner(self):
+        # Safety check: Stop if window closed or container hidden
+        if not self.winfo_exists() or not self.loading_container.winfo_exists():
+            return
+        # Don't run if it's been hidden by _on_sounds_fetched
+        if not self.loading_container.winfo_ismapped():
+            # Still check every 100ms if it's ready to show
+            self.after(100, self._animate_spinner)
+            return
+
+        self.spinner_canvas.delete("all")
+        self.spinner_canvas.create_arc(
+            5, 5, 45, 45,
+            start=self._spinner_angle,
+            extent=120,
+            width=4,
+            outline=self.colors["primary"],
+            style="arc"
+        )
+        self._spinner_angle = (self._spinner_angle + 10) % 360
+        self.after(30, self._animate_spinner)
+
+    def _animate_thinking_dots(self, step):
+        # Safety check: Stop if window closed or container hidden
+        if not self.winfo_exists() or not self.loading_container.winfo_exists():
+            return
+        if not self.loading_container.winfo_ismapped():
+            self.after(100, lambda: self._animate_thinking_dots(step))
+            return
+        
+        # Wave effect: .  ..  ...  ..  .
+        dots = [".  ", ".. ", "...", " ..", "  ."]
+        self.dots_label.config(text=dots[step % len(dots)])
+        self.after(300, lambda: self._animate_thinking_dots(step + 1))
+
     def _fetch_sounds(self):
         def task():
             try:
@@ -209,21 +271,26 @@ class OnlineSoundBrowser(tk.Toplevel):
                 if self.winfo_exists():
                     self.after(0, lambda: self._on_sounds_fetched(audio_files))
             except Exception as e:
-                error_msg = str(e)
+                # Log technical error to console but show user-friendly message
+                print(f"[Cloud] Sync error: {e}")
                 if self.winfo_exists():
-                    self.after(0, lambda: self._on_fetch_error(error_msg))
+                    self.after(0, lambda: self._on_fetch_error("The library is currently unavailable. Please check your internet connection."))
 
         threading.Thread(target=task, daemon=True).start()
 
     def _on_sounds_fetched(self, sounds):
         self.sounds = sounds
-        self.status_label.pack_forget()
+        self.loading_container.pack_forget()
 
         if not sounds:
-            self.status_label.config(
-                text="No audio files found in the 'Sounds' folder."
+            self.status_label = tk.Label(
+                self.content_frame,
+                text="The library is currently empty.",
+                bg=self.colors["bg"],
+                fg=self.colors["text_muted"],
+                font=("Segoe UI", 11),
             )
-            self.status_label.pack(pady=50)
+            self.status_label.pack(pady=100)
             return
 
         self.list_container.pack(fill="both", expand=True)
@@ -250,29 +317,45 @@ class OnlineSoundBrowser(tk.Toplevel):
         tk.Frame(self.scrollable_frame, bg=self.colors["bg"], height=60).pack()
 
     def _on_fetch_error(self, error):
-        self.status_label.config(
-            text=f"Error connecting to GitHub:\n{error}", fg=self.colors["danger"]
+        self.loading_container.pack_forget()
+        self.status_label = tk.Label(
+            self.content_frame,
+            text=f"Connection Error:\n{error}",
+            bg=self.colors["bg"],
+            fg=self.colors["danger"],
+            font=("Segoe UI", 11),
         )
+        self.status_label.pack(pady=100)
 
     def _build_sound_row(self, index, sound):
         row = tk.Frame(self.scrollable_frame, bg=self.colors["card"], pady=10, padx=15)
         row.pack(fill="x", pady=5)
+        row.columnconfigure(0, weight=1) # Name info (expands)
+        row.columnconfigure(1, weight=0) # Button area (fixed)
 
+        # Right Section: Buttons (Column 1)
         btn_frame = tk.Frame(row, bg=self.colors["card"])
-        btn_frame.pack(side="right", padx=(10, 0))
+        btn_frame.grid(row=0, column=1, sticky="e", padx=(10, 0))
 
         preview_btn = tk.Button(
             btn_frame,
             text="▶ Preview",
             bg=self.colors["primary"],
             fg=self.colors["bg"],
-            font=("Segoe UI", 9),
+            font=("Segoe UI", 9, "bold"),
             bd=0,
-            padx=10,
+            padx=12,
+            pady=4,
             cursor="hand2",
+            activebackground=self.colors["accent"],
+            activeforeground="white",
             command=lambda: self._preview_sound(index, preview_btn),
         )
         preview_btn.pack(side="left", padx=(0, 5))
+
+        # Add hover effect for preview button
+        preview_btn.bind("<Enter>", lambda e: preview_btn.config(bg=self.colors["accent"]))
+        preview_btn.bind("<Leave>", lambda e: preview_btn.config(bg=self.colors["primary"]))
 
         use_canvas = tk.Canvas(
             btn_frame,
@@ -283,26 +366,32 @@ class OnlineSoundBrowser(tk.Toplevel):
             cursor="hand2",
         )
         use_canvas.pack(side="left")
-        use_canvas.create_rectangle(0, 0, 85, 32, fill="#22c55e", outline="")
+        use_canvas.create_rectangle(0, 0, 85, 32, fill="#22c55e", outline="", tags="bg")
         use_canvas.create_text(
             42, 16, text="Use This", fill="white", font=("Segoe UI", 9, "bold")
         )
 
+        # Hover effects for canvas
+        use_canvas.bind("<Enter>", lambda e: use_canvas.itemconfig("bg", fill="#16a34a"))
+        use_canvas.bind("<Leave>", lambda e: use_canvas.itemconfig("bg", fill="#22c55e"))
+
         self.use_canvases[index] = use_canvas
         use_canvas.bind("<Button-1>", lambda e: self._download_and_use(index))
 
+        # Left Section: Name Info (Column 0)
         name_frame = tk.Frame(row, bg=self.colors["card"])
-        name_frame.pack(side="left", fill="both", expand=True)
+        name_frame.grid(row=0, column=0, sticky="nsew")
 
         name = sound["name"]
-        display_name = name if len(name) <= 35 else name[:32] + "..."
         name_label = tk.Label(
             name_frame,
-            text=display_name,
+            text=name,
             bg=self.colors["card"],
             fg=self.colors["text"],
             font=("Segoe UI", 10, "bold"),
             anchor="w",
+            wraplength=200, # Protect buttons by wrapping long names
+            justify="left",
         )
         name_label.pack(fill="x")
         ToolTip(name_label, name)
@@ -1309,8 +1398,8 @@ class ModernUI:
         brand_frame = tk.Frame(header, bg=self.colors["bg"])
         brand_frame.pack(side="left")
 
-        assets_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets")
-        img_path = os.path.join(assets_dir, "DawnGuardImg.png")
+        from config import get_resource_path
+        img_path = get_resource_path("assets/DawnGuardImg.png")
         if os.path.exists(img_path):
             try:
                 from PIL import Image, ImageTk
@@ -1573,8 +1662,8 @@ class ModernUI:
             empty_frame.pack(expand=True, fill="both", pady=100)
 
             # Try to load the brand image for the empty state
-            assets_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets")
-            img_path = os.path.join(assets_dir, "DawnGuardImg.png")
+            from config import get_resource_path
+            img_path = get_resource_path("assets/DawnGuardImg.png")
             if os.path.exists(img_path):
                 try:
                     from PIL import Image, ImageTk
@@ -1661,119 +1750,172 @@ class ModernUI:
         return text[: max_chars - 1].rstrip() + "…"
 
     def create_alarm_card(self, alarm):
+        is_enabled = getattr(alarm, "enabled", True)
         card = tk.Frame(
-            self.inner_frame, bg=self.colors["card"], bd=0, highlightthickness=0
+            self.inner_frame, 
+            bg=self.colors["card"], 
+            bd=0, 
+            highlightthickness=1,
+            highlightbackground=self.colors["card_hover"] if is_enabled else "#2d3748"
         )
-        card.pack(fill="x", pady=6, padx=8)
+        card.pack(fill="x", pady=8, padx=12)
+        card.columnconfigure(0, weight=1) # Info area (expands)
+        card.columnconfigure(1, weight=0) # Button area (fixed)
 
         def on_enter(e):
+            card.config(highlightbackground=self.colors["primary"] if is_enabled else self.colors["text_muted"])
             card.config(bg=self.colors["card_hover"])
 
         def on_leave(e):
+            card.config(highlightbackground=self.colors["card_hover"] if is_enabled else "#2d3748")
             card.config(bg=self.colors["card"])
 
         card.bind("<Enter>", on_enter)
         card.bind("<Leave>", on_leave)
 
+        # Left Section: Time & Info (Column 0)
         left = tk.Frame(card, bg=self.colors["card"])
-        left.pack(side="left", fill="both", expand=True, padx=12, pady=12)
+        left.grid(row=0, column=0, sticky="nsew", padx=(16, 8), pady=16)
         left.bind("<Enter>", on_enter)
         left.bind("<Leave>", on_leave)
 
-        tk.Label(
+        # Time
+        time_lbl = tk.Label(
             left,
             text=alarm.time,
-            font=("Segoe UI", 26, "bold"),
+            font=("Segoe UI", 28, "bold"),
             bg=self.colors["card"],
-            fg=self.colors["primary"],
-        ).pack(anchor="w")
-
-        countdown = tk.Label(
-            left,
-            text="",
-            font=("Segoe UI", 9),
-            bg=self.colors["card"],
-            fg=self.colors["accent"],
+            fg=self.colors["primary"] if is_enabled else self.colors["text_muted"],
         )
-        countdown.pack(anchor="w", pady=(2, 0))
+        time_lbl.pack(anchor="w")
+        time_lbl.bind("<Enter>", on_enter)
+        time_lbl.bind("<Leave>", on_leave)
+
+        # Status/Countdown row
+        status_frame = tk.Frame(left, bg=self.colors["card"])
+        status_frame.pack(anchor="w", pady=(2, 0))
+        
+        countdown = tk.Label(
+            status_frame,
+            text="",
+            font=("Segoe UI", 10, "bold"),
+            bg=self.colors["card"],
+            fg=self.colors["accent"] if is_enabled else self.colors["text_muted"],
+        )
+        countdown.pack(side="left")
         self._countdown_labels[getattr(alarm, "id", id(alarm))] = countdown
 
-        label_text = self.format_label_text(getattr(alarm, "label", ""), max_chars=30)
-        tk.Label(
+        # Label & Repeat (Wrapped to prevent pushing)
+        label_text = getattr(alarm, "label", "").strip() or "Alarm"
+        lbl = tk.Label(
             left,
             text=label_text,
-            font=("Segoe UI", 11),
+            font=("Segoe UI", 11, "bold"),
             bg=self.colors["card"],
-            fg=self.colors["text"],
-            wraplength=220,
+            fg=self.colors["text"] if is_enabled else self.colors["text_muted"],
+            anchor="w",
+            wraplength=240, # Fixed wrap length to protect buttons
             justify="left",
-        ).pack(anchor="w", pady=2)
+        )
+        lbl.pack(fill="x", pady=(8, 0))
+        lbl.bind("<Enter>", on_enter)
+        lbl.bind("<Leave>", on_leave)
+        ToolTip(lbl, label_text)
 
         repeat_text = self.format_repeat_text(getattr(alarm, "repeat", []))
-        tk.Label(
+        rep_lbl = tk.Label(
             left,
             text=repeat_text,
-            font=("Segoe UI", 9),
+            font=("Segoe UI", 10),
             bg=self.colors["card"],
             fg=self.colors["text_muted"],
-            wraplength=220,
-            justify="left",
-        ).pack(anchor="w")
+            anchor="w",
+            wraplength=240,
+        )
+        rep_lbl.pack(fill="x", pady=(2, 0))
+        rep_lbl.bind("<Enter>", on_enter)
+        rep_lbl.bind("<Leave>", on_leave)
 
-        right = tk.Frame(card, bg=self.colors["card"])
-        right.pack(side="right", padx=12, pady=12)
+        # Right Section: Actions (Column 1 - FIXED WIDTH AREA)
+        right = tk.Frame(card, bg=self.colors["card"], width=100)
+        right.grid(row=0, column=1, sticky="nse", padx=16, pady=16)
+        right.grid_propagate(False) # Force fixed width
         right.bind("<Enter>", on_enter)
         right.bind("<Leave>", on_leave)
 
+        # Professional Toggle Switch
         toggle_canvas = tk.Canvas(
             right,
-            width=32,
+            width=40,
             height=24,
             bg=self.colors["card"],
             highlightthickness=0,
             cursor="hand2",
         )
-        toggle_canvas.pack(pady=(0, 12))
-        self.draw_toggle_icon(toggle_canvas, getattr(alarm, "enabled", True))
+        toggle_canvas.pack(anchor="e", pady=(0, 15))
+        self.draw_toggle_icon(toggle_canvas, is_enabled)
         toggle_canvas.bind("<Button-1>", lambda e, a=alarm: self.toggle_alarm(a))
         ToolTip(toggle_canvas, "Enable / Disable alarm")
 
+        # Action Buttons (Edit / Delete)
         btns = tk.Frame(right, bg=self.colors["card"])
-        btns.pack()
+        btns.pack(anchor="e")
 
+        # Edit Button
         edit_btn = tk.Frame(
-            btns, bg=self.colors["card_hover"], padx=6, pady=6, cursor="hand2"
+            btns, bg=self.colors["card"], bd=1, highlightthickness=1, cursor="hand2",
+            highlightbackground=self.colors["card_hover"]
         )
         edit_btn.pack(side="left", padx=4)
+        
         edit_icon = tk.Canvas(
-            edit_btn,
-            width=20,
-            height=20,
-            bg=self.colors["card_hover"],
-            highlightthickness=0,
+            edit_btn, width=22, height=22, bg=self.colors["card"], highlightthickness=0
         )
-        edit_icon.pack()
-        self.draw_edit_icon(edit_icon, self.colors["text"])
+        edit_icon.pack(padx=3, pady=3)
+        self.draw_edit_icon(edit_icon, self.colors["primary"] if is_enabled else self.colors["text_muted"])
+        
+        def on_edit_enter(e):
+            edit_btn.config(bg=self.colors["card_hover"])
+            edit_icon.config(bg=self.colors["card_hover"])
+        def on_edit_leave(e):
+            edit_btn.config(bg=self.colors["card"])
+            edit_icon.config(bg=self.colors["card"])
+
+        edit_btn.bind("<Enter>", on_edit_enter)
+        edit_btn.bind("<Leave>", on_edit_leave)
         edit_btn.bind("<Button-1>", lambda e, a=alarm: self.open_edit_dialog(a))
         edit_icon.bind("<Button-1>", lambda e, a=alarm: self.open_edit_dialog(a))
         ToolTip(edit_btn, "Edit alarm")
-        ToolTip(edit_icon, "Edit alarm")
 
+        # Delete Button
         del_btn = tk.Frame(
-            btns, bg=self.colors["danger"], padx=6, pady=6, cursor="hand2"
+            btns, bg=self.colors["card"], bd=1, highlightthickness=1, 
+            highlightbackground="#4a5568", cursor="hand2"
         )
         del_btn.pack(side="left", padx=4)
+        
         del_icon = tk.Canvas(
-            del_btn, width=20, height=20, bg=self.colors["danger"], highlightthickness=0
+            del_btn, width=22, height=22, bg=self.colors["card"], highlightthickness=0
         )
-        del_icon.pack()
-        self.draw_delete_icon(del_icon, "white")
+        del_icon.pack(padx=3, pady=3)
+        self.draw_delete_icon(del_icon, "#a0aec0")
+        
+        def on_del_enter(e):
+            del_btn.config(bg=self.colors["danger"], highlightbackground=self.colors["danger"])
+            del_icon.config(bg=self.colors["danger"])
+            self.draw_delete_icon(del_icon, "white")
+        def on_del_leave(e):
+            del_btn.config(bg=self.colors["card"], highlightbackground="#4a5568")
+            del_icon.config(bg=self.colors["card"])
+            self.draw_delete_icon(del_icon, "#a0aec0")
+
+        del_btn.bind("<Enter>", on_del_enter)
+        del_btn.bind("<Leave>", on_del_leave)
         del_btn.bind("<Button-1>", lambda e, a=alarm: self.delete_alarm_with_confirm(a))
-        del_icon.bind(
-            "<Button-1>", lambda e, a=alarm: self.delete_alarm_with_confirm(a)
-        )
+        del_icon.bind("<Button-1>", lambda e, a=alarm: self.delete_alarm_with_confirm(a))
         ToolTip(del_btn, "Delete alarm")
-        ToolTip(del_icon, "Delete alarm")
+
+        self.update_countdowns()
 
         self.update_countdowns()
 
@@ -2259,8 +2401,8 @@ class ModernUI:
         dialog.title("⚙ Settings")
 
         # Set Window Icon
-        assets_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets")
-        ico_path = os.path.join(assets_dir, "DawnGuardIco.ico")
+        from config import get_resource_path
+        ico_path = get_resource_path("assets/DawnGuardIco.ico")
         if os.path.exists(ico_path):
             try:
                 dialog.iconbitmap(ico_path)
@@ -2361,9 +2503,15 @@ class ModernUI:
             font=("Segoe UI", 9),
         ).pack(anchor="w", pady=(0, 6))
 
-        sounds_dir = os.path.join(
-            os.path.dirname(os.path.abspath(__file__)), "AlarmSounds"
-        )
+        from config import get_base_dir
+        sounds_dir = os.path.join(get_base_dir(), "AlarmSounds")
+        # Create dir if not exists
+        if not os.path.exists(sounds_dir):
+            try:
+                os.makedirs(sounds_dir)
+            except:
+                pass
+
         found_paths = []
         if os.path.isdir(sounds_dir):
             for f in sorted(os.listdir(sounds_dir)):
@@ -2648,14 +2796,43 @@ class ModernUI:
             settings_dyn_vol_var,
         ).pack(fill="x", pady=(10, 0))
 
+        # Background Sound during TTS
+        bg_sound_frame = tk.Frame(voice_frame, bg=self.colors["card"])
+        bg_sound_frame.pack(fill="x", pady=(10, 0))
+        tk.Label(
+            bg_sound_frame,
+            text="Background Sound",
+            bg=self.colors["card"],
+            fg=self.colors["text"],
+            font=("Segoe UI", 10),
+        ).pack(side="left")
+        
+        settings_bg_sound_var = tk.StringVar(value=s.get("bg_sound_mode", "default"))
+        bg_sound_options = [
+            ("Default Alarm Sound", "default"),
+            ("Random from Library", "random")
+        ]
+        for txt, val in bg_sound_options:
+            tk.Radiobutton(
+                bg_sound_frame,
+                text=txt,
+                variable=settings_bg_sound_var,
+                value=val,
+                bg=self.colors["card"],
+                fg=self.colors["text"],
+                selectcolor=self.colors["bg"],
+                font=("Segoe UI", 9),
+                bd=0,
+            ).pack(side="left", padx=(10, 0))
+
         # Custom Phrase Editor Button
         def open_phrase_editor():
             editor = tk.Toplevel(dialog)
             editor.title("Edit Aggressive Phrases")
 
             # Set Window Icon
-            assets_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets")
-            ico_path = os.path.join(assets_dir, "DawnGuardIco.ico")
+            from config import get_resource_path
+            ico_path = get_resource_path("assets/DawnGuardIco.ico")
             if os.path.exists(ico_path):
                 try:
                     editor.iconbitmap(ico_path)
@@ -2674,7 +2851,8 @@ class ModernUI:
             btn_frame = tk.Frame(editor, bg=self.colors["bg"])
             btn_frame.pack(side="bottom", fill="x", pady=15, padx=20)
 
-            suggest_file = os.path.join(os.path.dirname(__file__), "suggest.text")
+            from config import get_base_dir
+            suggest_file = os.path.join(get_base_dir(), "suggest.text")
             txt_widget = tk.Text(
                 editor,
                 bg=self.colors["card"],
@@ -3036,6 +3214,7 @@ class ModernUI:
                 settings_pre_time_var,
                 settings_auto_stop_var,
                 settings_24h_var,
+                settings_bg_sound_var,
             ),
         ).pack(fill="x", pady=(25, 8), padx=30, ipady=10)
 
@@ -3083,6 +3262,7 @@ class ModernUI:
         pre_time_var,
         auto_stop_var,
         format_24h_var,
+        bg_sound_mode_var,
     ):
         from config import save_settings
 
@@ -3117,6 +3297,7 @@ class ModernUI:
         s["pre_alarm_time"] = pre_time_var.get()
         s["auto_stop_minutes"] = auto_stop_var.get()
         s["use_24h_format"] = format_24h_var.get()
+        s["bg_sound_mode"] = bg_sound_mode_var.get()
         save_settings(s)
 
         self.volume_var.set(s["default_volume"])
@@ -3180,8 +3361,8 @@ class ModernUI:
         dialog.title("Edit Alarm")
 
         # Set Window Icon
-        assets_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets")
-        ico_path = os.path.join(assets_dir, "DawnGuardIco.ico")
+        from config import get_resource_path
+        ico_path = get_resource_path("assets/DawnGuardIco.ico")
         if os.path.exists(ico_path):
             try:
                 dialog.iconbitmap(ico_path)

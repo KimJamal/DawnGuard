@@ -1,16 +1,35 @@
 import os
 import json
+import sys
+
+def get_base_dir():
+    """Get the correct base directory whether running as script or bundled EXE."""
+    if getattr(sys, 'frozen', False):
+        # Running as a bundled EXE
+        # For AlarmSounds, settings.json, alarms.json, we want them next to the EXE
+        return os.path.dirname(sys.executable)
+    # Running as a script
+    return os.path.dirname(os.path.abspath(__file__))
+
+def get_resource_path(relative_path):
+    """Get absolute path to resource, works for dev and for PyInstaller."""
+    try:
+        # PyInstaller creates a temp folder and stores path in _MEIPASS
+        base_path = sys._MEIPASS
+    except Exception:
+        base_path = os.path.dirname(os.path.abspath(__file__))
+    return os.path.join(base_path, relative_path)
 
 # === Original variables (backward compatible) ===
 APP_NAME = "DawnGuard Alarm"
-APP_VERSION = "1.0.0"
+APP_VERSION = "1.0.1"
 GITHUB_REPO = "KimJamal/DawnGuard" # Updated to your actual repo
-CONFIG_FILE = "alarms.json"
+CONFIG_FILE = os.path.join(get_base_dir(), "alarms.json")
 DEFAULT_VOLUME = 70
 FADE_IN_DURATION = 30
 
 # === New settings system ===
-SETTINGS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "settings.json")
+SETTINGS_FILE = os.path.join(get_base_dir(), "settings.json")
 
 DEFAULT_SETTINGS = {
     "user_name": "",

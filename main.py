@@ -5,8 +5,11 @@ import time
 import tkinter as tk
 import requests
 import webbrowser
+import subprocess # For running batch script
+import sys # For sys.executable
 from datetime import datetime, timedelta
 from tkinter import filedialog, messagebox, ttk
+from distutils.version import LooseVersion # For robust version comparison
 
 import pygame
 import pystray
@@ -56,26 +59,116 @@ class AlarmManager:
             response = requests.get(url, timeout=10)
             if response.status_code == 200:
                 data = response.json()
-                latest_version = data.get("tag_name", "").replace("v", "")
+                latest_version_str = data.get("tag_name", "").replace("v", "")
                 
-                # Simple version comparison
-                if latest_version and latest_version != APP_VERSION:
-                    html_url = data.get("html_url")
-                    print(f"[Update] New version available: {latest_version}")
-                    
-                    # Notify user after root window is ready
-                    if self.root:
-                        self.root.after(5000, lambda: self._prompt_update(latest_version, html_url))
+                if latest_version_str:
+                    current_version = LooseVersion(APP_VERSION)
+                    latest_version = LooseVersion(latest_version_str)
+
+                    if latest_version > current_version:
+                        download_url = None
+                        for asset in data.get("assets", []):
+                            if asset.get("name") == "DawnGuard.exe": # Assuming the EXE name
+                                download_url = asset.get("browser_download_url")
+                                break
+                        
+                        if download_url:
+                            print(f"[Update] New version available: {latest_version_str}")
+                            if self.root:
+                                self.root.after(5000, lambda: self._prompt_update(latest_version_str, download_url))
+                        else:
+                            print(f"[Update] New version {latest_version_str} found, but no DawnGuard.exe asset.")
+                    else:
+                        print(f"[Update] Current version {APP_VERSION} is up to date.")
+            else:
+                print(f"[Update] Failed to fetch latest release. Status code: {response.status_code}")
+        except requests.exceptions.RequestException as e:
+            print(f"[Update] Network error checking for updates: {e}")
         except Exception as e:
             print(f"[Update] Error checking for updates: {e}")
 
-    def _prompt_update(self, version, url):
-        """Show a modern-styled update prompt."""
+    def _prompt_update(self, version, download_url):
+        """Show a modern-styled update prompt and handle in-app download."""
         if messagebox.askyesno(
             "Update Available", 
-            f"A new version of {APP_NAME} (v{version}) is available!\n\nWould you like to visit the download page?"
+            f"A new version of {APP_NAME} (v{version}) is available!\n\nWould you like to download and install it now?"
         ):
-            webbrowser.open(url)
+            self._download_and_install_update(version, download_url)
+
+    def _download_and_install_update(self, version, download_url):
+        """Handles downloading the update and preparing for installation."""
+        dialog = DownloadProgressDialog(self.root, self, version)
+        # Start download in a new thread to keep UI responsive
+        threading.Thread(target=self._execute_download, args=(dialog, download_url), daemon=True).start()
+
+    def _execute_download(self, dialog, download_url):
+        try:
+            response = requests.get(download_url, stream=True, timeout=30)
+            response.raise_for_status()
+
+            total_size = int(response.headers.get("content-length", 0))
+            block_size = 1024 # 1 KB
+            downloaded_size = 0
+            
+            # Determine where to save the new EXE
+            from config import get_base_dir
+            temp_dir = os.path.join(get_base_dir(), "temp_update")
+            os.makedirs(temp_dir, exist_ok=True)
+            new_exe_path = os.path.join(temp_dir, "DawnGuard_new.exe")
+
+            with open(new_exe_path, "wb") as f:
+                for data in response.iter_content(block_size):
+                    downloaded_size += len(data)
+                    f.write(data)
+                    progress = (downloaded_size / total_size) * 100 if total_size else 0
+                    self.root.after(0, dialog.update_progress, progress, f"Downloading... {int(progress)}%")
+            
+            self.root.after(0, dialog.update_progress, 100, "Download Complete. Preparing for restart...")
+            self.root.after(1000, dialog.destroy) # Close dialog after a short delay
+
+            # Trigger the replacement and restart logic
+            self.root.after(1500, lambda: self._initiate_restart_for_update(new_exe_path))
+
+        except requests.exceptions.RequestException as e:
+            self.root.after(0, dialog.destroy)
+            messagebox.showerror("Download Error", f"Failed to download update: {e}")
+        except Exception as e:
+            self.root.after(0, dialog.destroy)
+            messagebox.showerror("Update Error", f"An unexpected error occurred: {e}")
+
+    def _initiate_restart_for_update(self, new_exe_path):
+        """Creates a batch script to replace the EXE and restarts the app."""
+        if not getattr(sys, 'frozen', False):
+            messagebox.showinfo("Update Info", "Update downloaded. Please restart the application manually.")
+            self.exit_app()
+            return
+
+        current_exe = sys.executable
+        update_script_path = os.path.join(os.path.dirname(current_exe), "update_DawnGuard.bat")
+        
+        # Create a simple batch script
+        script_content = f"""
+@echo off
+timeout /t 2 /nobreak > NUL
+del "{current_exe}"
+move "{new_exe_path}" "{current_exe}"
+start "" "{current_exe}"
+del "{update_script_path}"
+"""
+        with open(update_script_path, "w") as f:
+            f.write(script_content)
+        
+        # Execute the batch script and exit the current app
+        subprocess.Popen([update_script_path], shell=True, creationflags=subprocess.DETACHED_PROCESS)
+        self.exit_app()
+
+    def center_window(self, window, width, height):
+        window.update_idletasks()
+        screen_width = window.winfo_screenwidth()
+        screen_height = window.winfo_screenheight()
+        x = (screen_width // 2) - (width // 2)
+        y = (screen_height // 2) - (height // 2)
+        window.geometry(f"{width}x{height}+{x}+{y}")
 
     def _start_worker(self, alarm):
         if alarm.id in self._worker_stop_events:
@@ -95,8 +188,8 @@ class AlarmManager:
         t.start()
 
     def create_tray(self):
-        assets_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets")
-        img_path = os.path.join(assets_dir, "DawnGuardImg.png")
+        from config import get_resource_path
+        img_path = get_resource_path("assets/DawnGuardImg.png")
 
         try:
             if os.path.exists(img_path):
@@ -121,6 +214,7 @@ class AlarmManager:
                 if self.ring_window:
                     self.root.after(0, self.ring_window.destroy)
                     self.ring_window = None
+                self.notify_toast("Alarm Dismissed", "The alarm has been stopped from the tray.")
             elif label == "Snooze":
                 # Find the first active ringing alarm
                 # (Simple implementation: snooze whatever is ringing)
@@ -154,12 +248,15 @@ class AlarmManager:
         def is_alarm_ringing(item):
             return self.ring_window is not None and self.ring_window.winfo_exists()
 
+        def is_not_ringing(item):
+            return not is_alarm_ringing(item)
+
         menu = pystray.Menu(
             pystray.MenuItem("Show/Hide", on_tray_click, default=True),
             pystray.MenuItem(get_next_alarm_text, lambda: None, enabled=False),
             pystray.MenuItem("Dismiss Alarm", on_tray_click, visible=is_alarm_ringing),
-            pystray.MenuItem("Add New Alarm", on_tray_click),
-            pystray.MenuItem("Settings", on_tray_click),
+            pystray.MenuItem("Add New Alarm", on_tray_click, enabled=is_not_ringing),
+            pystray.MenuItem("Settings", on_tray_click, enabled=is_not_ringing),
             pystray.MenuItem("Exit", on_tray_click),
         )
 
@@ -179,11 +276,9 @@ class AlarmManager:
             self.root.title("DawnGuard")
 
             # Set Window Icon
-            assets_dir = os.path.join(
-                os.path.dirname(os.path.abspath(__file__)), "assets"
-            )
-            ico_path = os.path.join(assets_dir, "DawnGuardIco.ico")
-            img_path = os.path.join(assets_dir, "DawnGuardImg.png")
+            from config import get_resource_path
+            ico_path = get_resource_path("assets/DawnGuardIco.ico")
+            img_path = get_resource_path("assets/DawnGuardImg.png")
 
             if os.path.exists(ico_path):
                 try:
@@ -383,24 +478,27 @@ class AlarmManager:
         try:
             from win10toast import ToastNotifier
             toaster = ToastNotifier()
-            assets_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets")
-            ico_path = os.path.join(assets_dir, "DawnGuardIco.ico")
+            from config import get_resource_path
+            # Ensure absolute path for the icon
+            ico_path = os.path.abspath(get_resource_path("assets/DawnGuardIco.ico"))
             
             # Use threaded notification to avoid blocking the main app
+            # and increase duration slightly for visibility
             threading.Thread(
                 target=toaster.show_toast,
                 args=(title, message),
                 kwargs={
                     "icon_path": ico_path if os.path.exists(ico_path) else None,
-                    "duration": 5,
-                    "threaded": False # Threading handled by our outer Thread
+                    "duration": 7,
+                    "threaded": False
                 },
                 daemon=True
             ).start()
         except ImportError:
-            print("[Notify] win10toast not installed. Skipping toast.")
+            # Fallback for development if win10toast is missing
+            print(f"[TOAST] {title}: {message}")
         except Exception as e:
-            print(f"[Notify] Error: {e}")
+            print(f"[Notify] Toast Error: {e}")
 
     def trigger_alarm(self, alarm):
         self.notify_toast("Alarm Triggered!", f"Time for: {alarm.label}")
@@ -412,17 +510,31 @@ class AlarmManager:
             self.speak_alarm_label(alarm)
             tts_ran = True
 
+        # BACKGROUND SOUND LOGIC
+        bg_sound_mode = self.settings.get("bg_sound_mode", "default")
+        sound_to_play = alarm.sound
+        
+        if bg_sound_mode == "random":
+            # Try to pick a random sound from the AlarmSounds folder
+            from config import get_base_dir
+            sounds_dir = os.path.join(get_base_dir(), "AlarmSounds")
+            if os.path.exists(sounds_dir):
+                files = [f for f in os.listdir(sounds_dir) if f.lower().endswith((".mp3", ".wav", ".ogg"))]
+                if files:
+                    sound_to_play = os.path.join(sounds_dir, random.choice(files))
+
         if not tts_ran:
             threading.Thread(
                 target=play_alarm,
-                args=(alarm.sound, alarm.volume, alarm.fade_in, self.stop_event),
+                args=(sound_to_play, alarm.volume, alarm.fade_in, self.stop_event),
                 daemon=True,
             ).start()
-        elif self.settings.get("dynamic_tts_volume", True):
-            # Play sound quietly in background if TTS is leading
+        else:
+            # Play sound in background at lower volume while TTS is speaking
+            # We use 30% of the alarm's volume for the background
             threading.Thread(
                 target=play_alarm,
-                args=(alarm.sound, alarm.volume * 0.5, False, self.stop_event),
+                args=(sound_to_play, alarm.volume * 0.3, False, self.stop_event),
                 daemon=True,
             ).start()
 
@@ -539,7 +651,8 @@ class AlarmManager:
     ):
         try:
             loop_count = 0
-            suggest_file = os.path.join(os.path.dirname(__file__), "suggest.text")
+            from config import get_base_dir
+            suggest_file = os.path.join(get_base_dir(), "suggest.text")
             name = self.settings.get("user_name", "").strip()
             name_part = f" {name}" if name else ""
             rate = self.settings.get("tts_rate", 160)
@@ -553,59 +666,60 @@ class AlarmManager:
                 max_aggression, 999
             )
 
+            # Pre-load custom phrases to ensure variety
+            custom_phrases = []
+            if os.path.exists(suggest_file):
+                try:
+                    with open(suggest_file, "r", encoding="utf-8") as f:
+                        custom_phrases = [line.strip() for line in f if line.strip()]
+                except:
+                    pass
+
             while not stop_event.is_set() and loop_count < max_loops:
                 # Adjust loop count if snooze penalty is active
                 effective_loop = loop_count + (5 if skip_polite else 0)
 
-                # 1. Determine Phrase
-                if effective_loop <= 1:
-                    phrase = f"Attention, Attention. It is time for {label}."
+                # 1. Determine Phrase (Progressive variety)
+                if effective_loop == 0:
+                    phrase = f"Attention. It is time for {label}."
+                elif effective_loop == 1:
+                    phrase = f"Wake up! Your {label} alarm is ringing."
                 elif effective_loop <= 4:
-                    phrase = (
-                        f"Hey there! Please, it is time for {label}. Let's get moving."
-                    )
+                    phrase = random.choice([
+                        f"Hey there! Please, it is time for {label}. Let's get moving.",
+                        f"Time to wake up! Don't forget about {label}.",
+                        f"Good morning! {label} is waiting for you."
+                    ])
                 elif effective_loop <= 9:
-                    phrase = f"Excuse me! You really need to wake up now. It is time for {label}!"
+                    phrase = random.choice([
+                        f"Excuse me! You really need to wake up now. It is time for {label}!",
+                        f"Are you still sleeping? It's {label} time!",
+                        f"Rise and shine! {label} won't wait!"
+                    ])
                 elif effective_loop <= 15:
-                    phrase = f"Wake up! Wake up! You are going to be late for {label}! Stop ignoring me!"
-                elif effective_loop <= 19:
-                    phrase = f"ATTENTION! This is your final warning! Get out of bed for {label} right now!"
+                    phrase = random.choice([
+                        f"Wake up! Wake up! You are going to be late for {label}!",
+                        f"Stop ignoring me! It is time for {label} right now!",
+                        f"This is not a drill! Get up for {label}!"
+                    ])
                 else:
-                    # Fallback to custom suggest.txt phrases for loops 20+
-                    custom_phrase = ""
-                    if os.path.exists(suggest_file):
-                        try:
-                            with open(suggest_file, "r", encoding="utf-8") as f:
-                                phrases = [line.strip() for line in f if line.strip()]
-                                if phrases:
-                                    custom_phrase = random.choice(phrases)
-                        except:
-                            pass
-                    phrase = (
-                        custom_phrase
-                        if custom_phrase
-                        else f"I cannot believe this. We had a deal about {label}."
-                    )
+                    if custom_phrases:
+                        phrase = random.choice(custom_phrases)
+                    else:
+                        phrase = f"I cannot believe this. We had a deal about {label}."
 
-                text = (
-                    f"{phrase}{name_part}."
-                    if effective_loop > 1
-                    else f"{phrase}{name_part}."
-                )
+                text = f"{phrase}{name_part}."
 
                 # 2. Dynamic Volume Logic
                 tts_vol = 1.0
                 sound_vol = volume_penalty
                 if dynamic_vol:
                     if effective_loop <= 4:
-                        tts_vol, sound_vol = 0.7, volume_penalty
+                        tts_vol, sound_vol = 1.0, volume_penalty * 0.3
                     elif effective_loop <= 15:
-                        tts_vol, sound_vol = 0.9, volume_penalty * 0.6
+                        tts_vol, sound_vol = 1.0, volume_penalty * 0.5
                     else:
-                        tts_vol, sound_vol = (
-                            1.0,
-                            volume_penalty * 0.2,
-                        )  # TTS takes over completely
+                        tts_vol, sound_vol = 1.0, volume_penalty * 0.7
 
                 # Adjust background sound volume dynamically
                 try:
@@ -646,6 +760,7 @@ class AlarmManager:
                 loop_count += 1
 
                 # 4. Wait using Escalation Speed setting
+                # While waiting, we keep the background music playing
                 for _ in range(int(esc_speed * 10)):
                     if stop_event.is_set():
                         break
@@ -654,6 +769,14 @@ class AlarmManager:
             print("[TTS] Repeating speech stopped")
         except Exception as e:
             print(f"[TTS] Error: {e}")
+
+    def center_window(self, window, width, height):
+        window.update_idletasks()
+        screen_width = window.winfo_screenwidth()
+        screen_height = window.winfo_screenheight()
+        x = (screen_width // 2) - (width // 2)
+        y = (screen_height // 2) - (height // 2)
+        window.geometry(f"{width}x{height}+{x}+{y}")
 
     def show_ring_window(self, alarm):
         try:
@@ -664,14 +787,12 @@ class AlarmManager:
             win = tk.Toplevel(self.root)
             self.ring_window = win
             win.title("Wake Up!")
-            win.geometry("420x580")
+            self.center_window(win, 420, 580)
 
             # Set Window Icon
-            assets_dir = os.path.join(
-                os.path.dirname(os.path.abspath(__file__)), "assets"
-            )
-            ico_path = os.path.join(assets_dir, "DawnGuardIco.ico")
-            img_path = os.path.join(assets_dir, "DawnGuardImg.png")
+            from config import get_resource_path
+            ico_path = get_resource_path("assets/DawnGuardIco.ico")
+            img_path = get_resource_path("assets/DawnGuardImg.png")
 
             if os.path.exists(ico_path):
                 try:
@@ -690,7 +811,9 @@ class AlarmManager:
                     pass
 
             win.configure(bg="#0f172a")
+            win.transient(self.root)
             win.grab_set()
+            win.focus_force()
 
             # Scrolling label
             scroll_container = tk.Frame(
@@ -967,8 +1090,8 @@ class AlarmManager:
         dialog.geometry("300x210")
 
         # Set Window Icon
-        assets_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets")
-        ico_path = os.path.join(assets_dir, "DawnGuardIco.ico")
+        from config import get_resource_path
+        ico_path = get_resource_path("assets/DawnGuardIco.ico")
         if os.path.exists(ico_path):
             try:
                 dialog.iconbitmap(ico_path)
@@ -1087,6 +1210,59 @@ class AlarmManager:
         self.alarms.append(snooze_alarm)
         save_alarms(self.alarms)
         self._start_worker(snooze_alarm)
+
+
+class DownloadProgressDialog(tk.Toplevel):
+    def __init__(self, parent, manager, version):
+        super().__init__(parent)
+        self.manager = manager
+        self.version = version
+        self.title("Downloading Update")
+        self.geometry("350x150")
+        self.resizable(False, False)
+        self.configure(bg="#0f172a")
+        self.transient(parent)
+        self.grab_set()
+        self.protocol("WM_DELETE_WINDOW", self._on_closing) # Handle window close
+
+        self.manager.center_window(self, 350, 150)
+
+        tk.Label(
+            self,
+            text=f"Downloading DawnGuard v{version}...",
+            bg="#0f172a",
+            fg="white",
+            font=("Segoe UI", 11, "bold"),
+        ).pack(pady=15)
+
+        self.progress_var = tk.DoubleVar()
+        self.progress_bar = ttk.Progressbar(
+            self,
+            variable=self.progress_var,
+            maximum=100,
+            mode="determinate",
+            length=300,
+        )
+        self.progress_bar.pack(pady=5)
+
+        self.status_label = tk.Label(
+            self,
+            text="Connecting...",
+            bg="#0f172a",
+            fg="#cbd5e1",
+            font=("Segoe UI", 9),
+        )
+        self.status_label.pack()
+
+    def update_progress(self, value, status_text=""):
+        self.progress_var.set(value)
+        if status_text:
+            self.status_label.config(text=status_text)
+        self.update_idletasks()
+
+    def _on_closing(self):
+        messagebox.showwarning("Download in Progress", "Please wait for the download to complete.")
+        # Optionally, add logic to cancel download if user insists
 
 
 if __name__ == "__main__":
